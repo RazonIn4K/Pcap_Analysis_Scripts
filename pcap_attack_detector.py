@@ -45,13 +45,11 @@ def detect_sql_injection(pcap_file, time_filter=""):
         f"(http.request.uri contains \\\"%27\\\" or "
         f"http.request.uri contains \\\"SELECT\\\" or "
         f"http.request.uri contains \\\"UNION\\\" or "
-        f"http.request.body contains \\\"%27\\\" or "
-        f"http.request.body contains \\\"SELECT\\\" or "
         f"http.request.uri contains \\\"OR 1=1\\\" or "
         f"http.request.uri contains \\\"--\\\" or "
         f"http.request.uri contains \\\"%20OR%20\\\" or "
         f"http.request.uri contains \\\"information_schema\\\"){time_filter}\" "
-        f"-T fields -e frame.number -e frame.time -e ip.src -e http.request.uri -e http.request.body"
+        f"-T fields -e frame.number -e frame.time -e ip.src -e http.request.uri"
     )
     print(sql_patterns or "No SQL injection patterns detected")
     return sql_patterns
@@ -141,23 +139,14 @@ def detect_port_scan(pcap_file, threshold=10, time_filter=""):
     print("\n=== Sequential Port Access (Port Scan Indicator) ===")
     print(sequential_ports or "No sequential port access detected")
     
-    # New: analyze port scan timing (fast scan detection)
+    # Analyze port scan timing (fast scan detection)
     fast_scan = run_command(
-        f"tshark -r {pcap_file} -q -z 'io,stat,0.1,\"tcp.flags.syn==1 and tcp.flags.ack==0{time_filter}\"' | "
-        f"grep -v \"0.000000\""
+        f"tshark -r {pcap_file} -q -z \"io,stat,0.1\" | grep -v \"0.000000\""
     )
     print("\n=== High-Rate Port Scan Detection ===")
     print(fast_scan or "No high-rate port scanning detected")
-
-    # New: Port distribution analysis
-    port_distribution = run_command(
-        f"tshark -r {pcap_file} -Y \"tcp.flags.syn==1 and tcp.flags.ack==0{time_filter}\" "
-        f"-T fields -e tcp.dstport | sort | uniq -c | sort -nr | head -n 10"
-    )
-    print("\n=== Port Distribution Analysis ===")
-    print(port_distribution or "No port distribution data available")
     
-    return {"port_scan": port_scan, "sequential_ports": sequential_ports, "fast_scan": fast_scan, "port_distribution": port_distribution}
+    return {"port_scan": port_scan, "sequential_ports": sequential_ports, "fast_scan": fast_scan}
 
 def detect_ddos(pcap_file, time_filter=""):
     """Detect potential DDoS/DoS activity"""
@@ -205,41 +194,33 @@ def detect_syn_flood(pcap_file, threshold=100, time_filter=""):
     )
     print(syn_flood or "No SYN flood attacks detected")
     
-    # Check for high rate of SYN packets to same destination.  Use -Y for display filter.
+    # Check for high rate of SYN packets to same destination
     high_rate_syn = run_command(
-        f"tshark -r {pcap_file} -q -z 'io,stat,1,\"tcp.flags.syn==1{time_filter}\"' | "
+        f"tshark -r {pcap_file} -q -z \"io,stat,1,\\\"tcp.flags.syn == 1\\\"\" | "
         f"grep -v \"1.000000\""
     )
     print("\n=== SYN Packet Rate (Possible DoS) ===")
     print(high_rate_syn or "No abnormal SYN packet rates detected")
     
-    # New: SYN-to-host ratio analysis. Use -Y for display filter.
+    # SYN-to-host ratio analysis
     syn_ack_ratio = run_command(
-        f"tshark -r {pcap_file} -q -z 'io,stat,5,\"tcp.flags.syn==1\",\"tcp.flags.ack==1\"{time_filter}'"
+        f"tshark -r {pcap_file} -q -z \"io,stat,5,\\\"tcp.flags.syn == 1\\\",\\\"tcp.flags.ack == 1\\\"\""
     )
     print("\n=== SYN to ACK Ratio (Flood Indicator) ===")
     print(syn_ack_ratio or "No SYN-ACK ratio data available")
-
-    # New: SYN packet distribution per target
-    syn_targets = run_command(
-        f"tshark -r {pcap_file} -Y \"tcp.flags.syn==1 and not tcp.flags.ack==1{time_filter}\" "
-        f"-T fields -e ip.dst -e tcp.dstport | sort | uniq -c | sort -nr | head -n 10"
-    )
-    print("\n=== SYN Packet Distribution per Target ===")
-    print(syn_targets or "No SYN target distribution data available")
     
-    return {"syn_flood": syn_flood, "high_rate_syn": high_rate_syn, "syn_ack_ratio": syn_ack_ratio, "syn_targets":syn_targets}
+    return {"syn_flood": syn_flood, "high_rate_syn": high_rate_syn, "syn_ack_ratio": syn_ack_ratio}
 
 def detect_command_injection(pcap_file, time_filter=""):
-    """Detect potential command injection attempts"""
+    """Detect potential command injection attempts in HTTP traffic"""
     print("\n=== Potential Command Injection Attempts ===")
-    # Look for command injection patterns
+    
+    # First command for most patterns
     cmd_patterns = run_command(
         f"tshark -r {pcap_file} -Y \"http contains \\\";\\\" or "
         f"http contains \\\"|\\\" or "
         f"http contains \\\"&&\\\" or "
         f"http contains \\\"||\\\" or "
-        f"http contains \\\"`\\\" or "
         f"http contains \\\"%3B\\\" or "
         f"http contains \\\"cat /etc\\\" or "
         f"http contains \\\"ping -c\\\" or "
@@ -250,8 +231,20 @@ def detect_command_injection(pcap_file, time_filter=""):
         f"http contains \\\"bash -c\\\"{time_filter}\" "
         f"-T fields -e frame.number -e ip.src -e http.request.uri"
     )
-    print(cmd_patterns or "No command injection patterns detected")
-    return cmd_patterns
+    
+    # Use single quotes for backtick detection to prevent shell interpretation issues
+    backtick_patterns = run_command(
+        f'tshark -r {pcap_file} -Y "http contains \\\\\\`"{time_filter} '
+        f'-T fields -e frame.number -e ip.src -e http.request.uri'
+    )
+    
+    # Combine results
+    all_patterns = cmd_patterns or ""
+    if backtick_patterns:
+        all_patterns += "\n" + backtick_patterns if all_patterns else backtick_patterns
+    
+    print(all_patterns or "No command injection patterns detected")
+    return all_patterns
 
 def detect_directory_traversal(pcap_file, time_filter=""):
     """Detect potential directory traversal attempts"""
@@ -384,65 +377,20 @@ def analyze_application_protocols(pcap_file, time_filter=""):
     return results
 
 def detect_malware_traffic(pcap_file, time_filter=""):
-    """Detect traffic patterns associated with malware"""
+    """Detect potential malware communication patterns"""
     print("\n=== Potential Malware Communication ===")
-    results = {}
     
-    # Look for common C2 patterns, beaconing, and unusual DNS
     malware_patterns = run_command(
-        f"tshark -r {pcap_file} -Y \"(dns.qry.name contains \\\"bit\\\" or dns.qry.name contains \\\"onion\\\" or "
+        f"tshark -r {pcap_file} -Y \"(dns.qry.name contains \\\"bit\\\" or "
+        f"dns.qry.name contains \\\"onion\\\" or "
         f"dns.qry.name contains \\\"long\\\") or "
-        f"(http.user_agent contains 'MSIE' and http.request.version != 'HTTP/1.1') or "
+        f"(http.user_agent contains \\\"MSIE\\\" and http.request.version != \\\"HTTP/1.1\\\") or "
         f"(tcp.flags == 0x02 and tcp.window_size <= 1024){time_filter}\" "
         f"-T fields -e frame.time -e ip.src -e ip.dst -e dns.qry.name -e http.user_agent | head -n 20"
     )
-
     print(malware_patterns or "No suspicious malware traffic patterns detected")
-    results["malware_patterns"] = malware_patterns
     
-    # Check for periodic beaconing (regular interval communication)
-    print("\n=== Potential Beaconing (Regular Interval Communication) ===")
-    beaconing = run_command(
-        f"tshark -r {pcap_file} -T fields -e frame.time -e ip.src -e ip.dst -e tcp.dstport "
-        f"-Y \"tcp and not tcp.port==80 and not tcp.port==443{time_filter}\" | head -n 100"
-    )
-    
-    print("To analyze for beaconing, export this data and check for regular time intervals")
-    results["potential_beaconing"] = beaconing
-    
-    # Unusual DNS TXT records (often used for C2)
-    txt_records = run_command(
-        f"tshark -r {pcap_file} -Y \"dns.txt{time_filter}\" -T fields "
-        f"-e frame.time -e ip.src -e dns.qry.name -e dns.txt"
-    )
-    print("\n=== DNS TXT Records (Potential C2 Channel) ===")
-    print(txt_records or "No suspicious DNS TXT records found")
-    results["txt_records"] = txt_records
-    
-    # Entropy analysis of DNS queries (potential DGA detection)
-    dns_names = run_command(
-        f"tshark -r {pcap_file} -Y \"dns.qry.name{time_filter}\" -T fields -e dns.qry.name | sort | uniq"
-    )
-    if dns_names:
-        print("\n=== DNS Query Name Entropy (Potential DGA Detection) ===")
-        high_entropy_domains = []
-        dns_name_list = dns_names.strip().split('\n')
-        for domain in dns_name_list[:50]:  # Limit analysis to first 50 domains
-            if domain and len(domain) > 8:
-                entropy = calculate_entropy(domain)  # Use imported function
-                if entropy > 4.0:  # High entropy threshold
-                    high_entropy_domains.append(f"{domain}: {entropy:.2f}")
-        
-        if high_entropy_domains:
-            print("Potential algorithmically generated domains (high entropy):")
-            for domain in high_entropy_domains:
-                print(domain)
-            results["high_entropy_domains"] = high_entropy_domains
-        else:
-            print("No high entropy domain names detected")
-    
-    return results
-
+    return malware_patterns
 
 def detect_packet_anomalies(pcap_file, time_filter=""):
     """Detect unusual packet characteristics"""
