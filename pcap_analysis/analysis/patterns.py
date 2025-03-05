@@ -1,95 +1,106 @@
 #!/usr/bin/env python3
 import math
 from ..core.command import run_command
+from typing import Dict, List, Tuple, Optional, Union, Any
+import numpy as np
+import logging
 
-def analyze_timing_patterns(pcap_file, ip_addr=None, time_filter=""):
-    """Analyze timing patterns between packets for regular intervals (C2 beaconing)"""
-    print("\n=== Timing Pattern Analysis (Beaconing Detection) ===")
+logger = logging.getLogger(__name__)
+
+def analyze_timing_patterns(
+    pcap_file: str, 
+    ip_addr: Optional[str] = None, 
+    time_filter: str = ""
+) -> Dict[str, Any]:
+    """
+    Analyze timing patterns between packets to detect potential C2 beaconing.
     
-    # Construct filter for specific IP if provided
+    This function examines the time intervals between packets to identify
+    regular communication patterns that might indicate command and control
+    beaconing activity.
+    
+    Args:
+        pcap_file: Path to the PCAP file to analyze
+        ip_addr: Optional IP address to filter on
+        time_filter: Additional time filter in Wireshark display filter format
+        
+    Returns:
+        Dictionary containing timing analysis results with the following keys:
+        - intervals: List of time intervals between packets
+        - regular_intervals: List of detected regular intervals
+        - potential_beaconing: Boolean indicating if beaconing was detected
+        - cv_values: Coefficient of variation values for detected intervals
+        
+    Raises:
+        FileNotFoundError: If the PCAP file does not exist
+    """
+    print("\n=== Timing Pattern Analysis ===")
+    results: Dict[str, Any] = {}
+    
+    # Build filter
     ip_filter = f" and ip.addr == {ip_addr}" if ip_addr else ""
+    filter_expr = f"ip{ip_filter}{time_filter}"
     
-    # Get packet timestamps for analysis
-    timestamps = run_command(
-        f"tshark -r {pcap_file} -Y \"tcp{ip_filter}{time_filter}\" -T fields -e frame.time_epoch -e ip.src -e ip.dst -e tcp.dstport"
+    # Extract packet timestamps
+    timestamps_str = run_command(
+        f"tshark -r {pcap_file} -Y \"{filter_expr}\" "
+        f"-T fields -e frame.time_epoch | sort",
+        verbose=False
     )
     
-    if not timestamps:
+    if not timestamps_str:
         print("No packets found for timing analysis")
-        return None
+        return {"error": "No packets found for timing analysis"}
     
-    # Process timestamp data
-    lines = timestamps.strip().split('\n')
-    time_data = {}
-    
-    for line in lines:
-        if not line.strip():
-            continue
-            
-        parts = line.split()
-        if len(parts) >= 4:
-            try:
-                ts = float(parts[0])
-                src = parts[1]
-                dst = parts[2]
-                port = parts[3]
-                key = f"{src}:{dst}:{port}"
-                
-                if key not in time_data:
-                    time_data[key] = []
-                    
-                time_data[key].append(ts)
-            except:
-                continue
-    
-    # Analyze intervals for regular patterns
-    beacon_candidates = []
-    
-    for connection, times in time_data.items():
-        if len(times) < 5:  # Need enough samples
-            continue
-            
-        # Sort timestamps
-        times.sort()
+    # Convert to float and calculate intervals
+    try:
+        timestamps = [float(ts) for ts in timestamps_str.strip().split('\n')]
+        intervals = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
         
-        # Calculate intervals
-        intervals = [times[i+1] - times[i] for i in range(len(times)-1)]
-        
-        # Skip if no intervals
         if not intervals:
-            continue
-            
-        # Calculate statistics
-        avg_interval = sum(intervals) / len(intervals)
+            print("Not enough packets for timing analysis")
+            return {"error": "Not enough packets for timing analysis"}
         
-        # Calculate variance of intervals
-        if len(intervals) > 1:
-            variance = sum((x - avg_interval) ** 2 for x in intervals) / len(intervals)
-            stdev = math.sqrt(variance)
+        results["intervals"] = intervals
+        
+        # Calculate statistics
+        mean_interval = np.mean(intervals)
+        std_interval = np.std(intervals)
+        cv = std_interval / mean_interval if mean_interval > 0 else float('inf')
+        
+        print(f"Mean interval: {mean_interval:.6f} seconds")
+        print(f"Standard deviation: {std_interval:.6f} seconds")
+        print(f"Coefficient of variation: {cv:.6f}")
+        
+        results["mean_interval"] = mean_interval
+        results["std_interval"] = std_interval
+        results["cv"] = cv
+        
+        # Detect regular intervals (potential beaconing)
+        regular_intervals = []
+        for interval in set(intervals):
+            # Count occurrences with small tolerance
+            tolerance = 0.01  # 10ms tolerance
+            count = sum(1 for i in intervals if abs(i - interval) < tolerance)
+            if count >= 3:  # At least 3 occurrences
+                regular_intervals.append((interval, count))
+        
+        if regular_intervals:
+            print("\n-- Regular Intervals Detected (Potential Beaconing) --")
+            for interval, count in sorted(regular_intervals, key=lambda x: x[1], reverse=True):
+                print(f"Interval: {interval:.6f} seconds, Occurrences: {count}")
             
-            # Low standard deviation suggests regular beaconing
-            regularity = stdev / avg_interval if avg_interval > 0 else float('inf')
-            
-            if regularity < 0.1:  # Highly regular
-                src, dst, port = connection.split(':')
-                beacon_candidates.append({
-                    "connection": connection,
-                    "avg_interval": avg_interval,
-                    "regularity": regularity,
-                    "samples": len(times)
-                })
-    
-    if beacon_candidates:
-        print("Potential beaconing behavior detected:")
-        for bc in beacon_candidates:
-            print(f"Connection: {bc['connection']}")
-            print(f"  Average interval: {bc['avg_interval']:.2f} seconds")
-            print(f"  Regularity: {bc['regularity']:.4f} (lower is more regular)")
-            print(f"  Samples: {bc['samples']}")
-    else:
-        print("No regular communication patterns detected")
-    
-    return beacon_candidates
+            results["regular_intervals"] = regular_intervals
+            results["potential_beaconing"] = True
+        else:
+            print("No regular intervals detected")
+            results["potential_beaconing"] = False
+        
+        return results
+        
+    except Exception as e:
+        logger.exception(f"Error analyzing timing patterns: {e}")
+        return {"error": str(e)}
 
 def detect_beaconing(pcap_file, time_filter=""):
     """Detect C2 beaconing using time series analysis"""

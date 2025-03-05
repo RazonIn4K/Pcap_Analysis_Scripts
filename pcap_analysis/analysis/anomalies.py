@@ -8,8 +8,9 @@ def detect_packet_anomalies(pcap_file, time_filter=""):
     
     # Find unusually large packets
     large_packets = run_command(
-        f"tshark -r {pcap_file} -Y 'frame.len > 1500{time_filter}' "
-        f"-T fields -e frame.number -e frame.len -e ip.src -e ip.dst | head -n 15"
+        f"tshark -r {pcap_file} -q -z io,stat,0 -Y 'frame.len > 1500{time_filter}' "
+        f"-T fields -e frame.number -e frame.len -e ip.src -e ip.dst | head -n 15",
+        verbose=False
     )
     print("\n-- Unusually Large Packets --")
     print(large_packets or "No unusually large packets detected")
@@ -17,8 +18,9 @@ def detect_packet_anomalies(pcap_file, time_filter=""):
     
     # Find fragmented packets (potential evasion)
     fragmented = run_command(
-        f"tshark -r {pcap_file} -Y 'ip.flags.mf == 1 or ip.frag_offset > 0{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
+        f"tshark -r {pcap_file} -q -z io,stat,0 -Y 'ip.flags.mf == 1 or ip.frag_offset > 0{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15",
+        verbose=False
     )
     print("\n-- Fragmented Packets --")
     print(fragmented or "No fragmented packets detected")
@@ -26,8 +28,9 @@ def detect_packet_anomalies(pcap_file, time_filter=""):
     
     # Check for TCP window size anomalies
     window_anomalies = run_command(
-        f"tshark -r {pcap_file} -Y 'tcp.window_size == 0 and tcp.flags.reset == 0{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
+        f"tshark -r {pcap_file} -q -z io,stat,0 -Y 'tcp.window_size == 0 and tcp.flags.reset == 0{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15",
+        verbose=False
     )
     print("\n-- TCP Window Size Zero (Potential DoS) --")
     print(window_anomalies or "No TCP window size anomalies detected")
@@ -35,8 +38,9 @@ def detect_packet_anomalies(pcap_file, time_filter=""):
     
     # Unusual TTL values (possible spoofing or covert channel)
     unusual_ttl = run_command(
-        f"tshark -r {pcap_file} -Y 'ip.ttl < 10 or ip.ttl > 250{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst -e ip.ttl | head -n 15"
+        f"tshark -r {pcap_file} -q -z io,stat,0 -Y 'ip.ttl < 10 or ip.ttl > 250{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst -e ip.ttl | head -n 15",
+        verbose=False
     )
     print("\n-- Unusual TTL Values (Potential Spoofing) --")
     print(unusual_ttl or "No unusual TTL values detected")
@@ -44,8 +48,9 @@ def detect_packet_anomalies(pcap_file, time_filter=""):
     
     # TCP retransmissions (network issues or potential DoS)
     retransmissions = run_command(
-        f"tshark -r {pcap_file} -Y 'tcp.analysis.retransmission{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
+        f"tshark -r {pcap_file} -q -z io,stat,0 -Y 'tcp.analysis.retransmission{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15",
+        verbose=False
     )
     print("\n-- TCP Retransmissions --")
     print(retransmissions or "No TCP retransmissions detected")
@@ -68,7 +73,8 @@ def detect_anomalies(pcap_file, time_filter=""):
     # Extract features for anomaly detection
     packet_data = run_command(
         f"tshark -r {pcap_file} -T fields -e frame.time_epoch -e ip.src -e ip.dst -e frame.len "
-        f"-e tcp.window_size -e _ws.col.Protocol{time_filter}"
+        f"-e tcp.window_size -e _ws.col.Protocol{time_filter}",
+        verbose=False
     )
     
     if not packet_data:

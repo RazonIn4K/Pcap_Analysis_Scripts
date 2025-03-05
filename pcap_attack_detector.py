@@ -9,16 +9,42 @@ import sys
 import csv
 from datetime import datetime
 import time
-from pcap_analysis.core.utils import calculate_entropy
-import math
+from typing import Dict, List, Tuple, Optional, Union, Any
+from pcap_analysis.core.security import sanitize_filter, validate_pcap_file, sanitize_filename, sanitize_output_path
+
+# Define DependencyError in this file instead of importing it
+class DependencyError(Exception):
+    """Exception raised when a dependency is missing"""
+    def __init__(self, dependency: str, install_instructions: Optional[str] = None):
+        self.dependency = dependency
+        self.install_instructions = install_instructions
+        message = f"Required dependency not found: {dependency}"
+        if install_instructions:
+            message += f"\n{install_instructions}"
+        super().__init__(message)
 
 # Global cache for command results
-command_cache = {}
+command_cache: Dict[str, Tuple[float, str]] = {}
 
-def run_command(command, use_cache=True):
-    """Execute a shell command and return its output with progress indicator"""
+def run_command(command: str, use_cache: bool = True) -> Optional[str]:
+    """
+    Execute a shell command and return its output with progress indicator.
+    
+    Args:
+        command: The shell command to execute
+        use_cache: Whether to use cached results if available
+        
+    Returns:
+        str or None: Command output or None if error occurred
+    """
+    # Sanitize the command for security
+    command = sanitize_filter(command)
+    
+    # Check cache
+    current_time = time.time()
     if use_cache and command in command_cache:
-        return command_cache[command]
+        cached_time, cached_result = command_cache[command]
+        return cached_result
         
     try:
         print("Running analysis...", end="\r")
@@ -31,11 +57,79 @@ def run_command(command, use_cache=True):
         result = stdout.decode('utf-8')
         
         if use_cache:
-            command_cache[command] = result
+            # Store the result with timestamp - overwrite any existing cache entry
+            command_cache[command] = (current_time, result)
         return result
     except Exception as e:
         print(f"Exception while running command: {e}")
         return None
+
+def run_command_with_retry(command: str, max_retries: int = 2) -> Optional[str]:
+    """
+    Run a command with retries if it fails.
+    
+    Args:
+        command: The command to execute
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        str or None: Command output or None if all attempts failed
+    """
+    for attempt in range(max_retries + 1):
+        result = run_command(command, use_cache=(attempt == 0))  # Only use cache on first attempt
+        if result is not None:
+            return result
+        
+        if attempt < max_retries:
+            # Wait before retrying (with exponential backoff)
+            retry_delay = 2 ** attempt
+            print(f"Command failed, retrying in {retry_delay} seconds... (Attempt {attempt+1}/{max_retries})")
+            time.sleep(retry_delay)
+    
+    print(f"Command failed after {max_retries} retries")
+    return None
+
+def verify_dependency(dependency_name):
+    """
+    Check if a required external dependency is available on the system.
+    
+    Args:
+        dependency_name (str): Name of the dependency to check
+        
+    Raises:
+        DependencyError: If the dependency is not found
+        
+    Returns:
+        bool: True if dependency is available
+    """
+    try:
+        # Platform-specific command to check for dependency
+        if os.name == 'nt':  # Windows
+            command = ['where', dependency_name]
+        else:  # Unix/Linux/Mac
+            command = ['which', dependency_name]
+            
+        subprocess.run(command, 
+                      check=True, 
+                      stdout=subprocess.PIPE, 
+                      stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError:
+        # Create platform-specific install instructions
+        install_instructions = ""
+        if dependency_name == "tshark":
+            if os.name == 'nt':  # Windows
+                install_instructions = "Install Wireshark from https://www.wireshark.org/download.html"
+            elif sys.platform == 'darwin':  # macOS
+                install_instructions = "Install Wireshark: brew install wireshark"
+            else:  # Linux
+                install_instructions = "Install Wireshark: sudo apt install wireshark or sudo yum install wireshark"
+        elif dependency_name == "capinfos":
+            install_instructions = "This tool is part of the Wireshark package"
+        elif dependency_name in ["mergecap", "editcap"]:
+            install_instructions = "This tool is part of the Wireshark package"
+            
+        raise DependencyError(dependency_name, install_instructions)
 
 def detect_sql_injection(pcap_file, time_filter=""):
     """Detect potential SQL injection attempts in HTTP traffic"""
@@ -140,8 +234,9 @@ def detect_port_scan(pcap_file, threshold=10, time_filter=""):
     print(sequential_ports or "No sequential port access detected")
     
     # Analyze port scan timing (fast scan detection)
-    fast_scan = run_command(
-        f"tshark -r {pcap_file} -q -z \"io,stat,0.1\" | grep -v \"0.000000\""
+    fast_scan = run_command_with_retry(
+        f"tshark -r {pcap_file} -q -z \"io,stat,0.1,\\\"tcp.flags.syn==1 and tcp.flags.ack==0{time_filter}\\\"\" | "
+        f"grep -v \"0.000000\""
     )
     print("\n=== High-Rate Port Scan Detection ===")
     print(fast_scan or "No high-rate port scanning detected")
@@ -154,7 +249,7 @@ def detect_ddos(pcap_file, time_filter=""):
     
     # Look for high volume of traffic to same destination
     traffic_volume = run_command(
-        f"tshark -r {pcap_file} -q -z ip_dst,tree | sort -k 2nr | head -n 20"
+        f"tshark -r {pcap_file} -q -z conv,ip | sort -k 2nr | head -n 20"
     )
     print(traffic_volume or "No unusual traffic volume detected")
     
@@ -173,16 +268,8 @@ def detect_ddos(pcap_file, time_filter=""):
     )
     print("\n=== ICMP Flood Detection ===")
     print(icmp_flood or "No ICMP flood detected")
-
-    # New: UDP flood detection
-    udp_flood = run_command(
-        f"tshark -r {pcap_file} -Y \"udp{time_filter}\" -T fields "
-        f"-e ip.src -e ip.dst -e udp.dstport | sort | uniq -c | sort -nr | head -n 15"
-    )
-    print("\n=== UDP Flood Detection ===")
-    print(udp_flood or "No UDP flood detected")
     
-    return {"traffic_volume": traffic_volume, "http_flood": http_flood, "icmp_flood": icmp_flood, "udp_flood": udp_flood}
+    return {"traffic_volume": traffic_volume, "http_flood": http_flood, "icmp_flood": icmp_flood}
 
 def detect_syn_flood(pcap_file, threshold=100, time_filter=""):
     """Detect potential SYN flood attacks"""
@@ -196,7 +283,7 @@ def detect_syn_flood(pcap_file, threshold=100, time_filter=""):
     
     # Check for high rate of SYN packets to same destination
     high_rate_syn = run_command(
-        f"tshark -r {pcap_file} -q -z \"io,stat,1,\\\"tcp.flags.syn == 1\\\"\" | "
+        f"tshark -r {pcap_file} -q -z \"io,stat,1,\\\"tcp.flags.syn==1 and not tcp.flags.ack==1 and not tcp.flags.rst==1\\\"{time_filter}\\\"\" | "
         f"grep -v \"1.000000\""
     )
     print("\n=== SYN Packet Rate (Possible DoS) ===")
@@ -204,7 +291,7 @@ def detect_syn_flood(pcap_file, threshold=100, time_filter=""):
     
     # SYN-to-host ratio analysis
     syn_ack_ratio = run_command(
-        f"tshark -r {pcap_file} -q -z \"io,stat,5,\\\"tcp.flags.syn == 1\\\",\\\"tcp.flags.ack == 1\\\"\""
+        f"tshark -r {pcap_file} -q -z \"io,stat,5,\\\"tcp.flags.syn==1 and not tcp.flags.ack==1 and not tcp.flags.rst==1\\\",\\\"tcp.flags.ack==1\\\"\""
     )
     print("\n=== SYN to ACK Ratio (Flood Indicator) ===")
     print(syn_ack_ratio or "No SYN-ACK ratio data available")
@@ -215,7 +302,7 @@ def detect_command_injection(pcap_file, time_filter=""):
     """Detect potential command injection attempts in HTTP traffic"""
     print("\n=== Potential Command Injection Attempts ===")
     
-    # First command for most patterns
+    # Look for command injection patterns
     cmd_patterns = run_command(
         f"tshark -r {pcap_file} -Y \"http contains \\\";\\\" or "
         f"http contains \\\"|\\\" or "
@@ -232,19 +319,8 @@ def detect_command_injection(pcap_file, time_filter=""):
         f"-T fields -e frame.number -e ip.src -e http.request.uri"
     )
     
-    # Use single quotes for backtick detection to prevent shell interpretation issues
-    backtick_patterns = run_command(
-        f'tshark -r {pcap_file} -Y "http contains \\\\\\`"{time_filter} '
-        f'-T fields -e frame.number -e ip.src -e http.request.uri'
-    )
-    
-    # Combine results
-    all_patterns = cmd_patterns or ""
-    if backtick_patterns:
-        all_patterns += "\n" + backtick_patterns if all_patterns else backtick_patterns
-    
-    print(all_patterns or "No command injection patterns detected")
-    return all_patterns
+    print(cmd_patterns or "No command injection patterns detected")
+    return cmd_patterns
 
 def detect_directory_traversal(pcap_file, time_filter=""):
     """Detect potential directory traversal attempts"""
@@ -294,6 +370,85 @@ def detect_ldap_attacks(pcap_file, time_filter=""):
         "ldap_injection": ldap_injection,
         "ldap_bind_failures": ldap_bind_failures
     }
+
+def detect_packet_anomalies(pcap_file, time_filter=""):
+    """Detect unusual packet characteristics"""
+    print("\n=== Packet Anomalies ===")
+    results = {}
+    
+    # Find unusually large packets
+    large_packets = run_command(
+        f"tshark -r {pcap_file} -Y 'frame.len > 1500{time_filter}' "
+        f"-T fields -e frame.number -e frame.len -e ip.src -e ip.dst | head -n 15"
+    )
+    print("\n-- Unusually Large Packets --")
+    print(large_packets or "No unusually large packets detected")
+    results["large_packets"] = large_packets
+    
+    # Find fragmented packets (potential evasion)
+    fragmented = run_command(
+        f"tshark -r {pcap_file} -Y 'ip.flags.mf == 1 or ip.frag_offset > 0{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
+    )
+    print("\n-- Fragmented Packets --")
+    print(fragmented or "No fragmented packets detected")
+    results["fragmented"] = fragmented
+    
+    # Check for TCP window size anomalies
+    window_anomalies = run_command(
+        f"tshark -r {pcap_file} -Y 'tcp.window_size == 0 and tcp.flags.reset == 0{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
+    )
+    print("\n-- TCP Window Size Zero (Potential DoS) --")
+    print(window_anomalies or "No TCP window size anomalies detected")
+    results["window_anomalies"] = window_anomalies
+    
+    # Unusual TTL values (possible spoofing or covert channel)
+    unusual_ttl = run_command(
+        f"tshark -r {pcap_file} -Y 'ip.ttl < 10 or ip.ttl > 128{time_filter}' "
+        f"-T fields -e frame.number -e ip.src -e ip.dst -e ip.ttl | head -n 15"
+    )
+    print("\n-- Unusual TTL Values (Potential Spoofing) --")
+    print(unusual_ttl or "No unusual TTL values detected")
+    results["unusual_ttl"] = unusual_ttl
+    
+    return results
+
+def detect_malware_traffic(pcap_file, time_filter=""):
+    """Detect potential malware communication patterns"""
+    print("\n=== Potential Malware Communication ===")
+    results = {}
+    
+    # Improved malware patterns detection
+    malware_patterns = run_command(
+        f"tshark -r {pcap_file} -Y \"(dns.qry.name contains \\\".bit\\\" or "
+        f"dns.qry.name contains \\\".onion\\\" or dns.qry.name matches \\\"[a-zA-Z0-9]{{25,}}\\\\.(com|net|org)\\\") or "
+        f"(http.user_agent contains \\\"MSIE\\\" and http.request.version != \\\"HTTP/1.1\\\") or "
+        f"(tcp.flags == 0x02 and tcp.window_size <= 1024){time_filter}\" "
+        f"-T fields -e frame.time -e ip.src -e ip.dst -e dns.qry.name -e tcp.dstport"
+    )
+    print(malware_patterns or "No suspicious malware traffic patterns detected")
+    results["malware_patterns"] = malware_patterns
+    
+    # Add beaconing detection
+    print("\n=== Potential Beaconing (Regular Interval Communication) ===")
+    beaconing = run_command(
+        f"tshark -r {pcap_file} -T fields -e frame.time -e ip.src -e ip.dst -e tcp.dstport "
+        f"-Y \"tcp and not tcp.port==80 and not tcp.port==443{time_filter}\" | head -n 100"
+    )
+    print("To analyze for beaconing, export this data and check for regular time intervals")
+    results["potential_beaconing"] = beaconing
+
+    # Add DNS TXT record analysis
+    txt_records = run_command(
+        f"tshark -r {pcap_file} -Y \"dns.txt{time_filter}\" -T fields "
+        f"-e frame.time -e ip.src -e dns.qry.name -e dns.txt"
+    )
+    print("\n=== DNS TXT Records (Potential C2 Channel) ===")
+    print(txt_records or "No suspicious DNS TXT records found")
+    results["txt_records"] = txt_records
+
+    return results
 
 def analyze_http_responses(pcap_file, time_filter=""):
     """Analyze HTTP response codes for potential issues"""
@@ -376,74 +531,19 @@ def analyze_application_protocols(pcap_file, time_filter=""):
     
     return results
 
-def detect_malware_traffic(pcap_file, time_filter=""):
-    """Detect potential malware communication patterns"""
-    print("\n=== Potential Malware Communication ===")
-    
-    malware_patterns = run_command(
-        f"tshark -r {pcap_file} -Y \"(dns.qry.name contains \\\"bit\\\" or "
-        f"dns.qry.name contains \\\"onion\\\" or "
-        f"dns.qry.name contains \\\"long\\\") or "
-        f"(http.user_agent contains \\\"MSIE\\\" and http.request.version != \\\"HTTP/1.1\\\") or "
-        f"(tcp.flags == 0x02 and tcp.window_size <= 1024){time_filter}\" "
-        f"-T fields -e frame.time -e ip.src -e ip.dst -e dns.qry.name -e http.user_agent | head -n 20"
-    )
-    print(malware_patterns or "No suspicious malware traffic patterns detected")
-    
-    return malware_patterns
-
-def detect_packet_anomalies(pcap_file, time_filter=""):
-    """Detect unusual packet characteristics"""
-    print("\n=== Packet Anomalies ===")
-    results = {}
-    
-    # Find unusually large packets
-    large_packets = run_command(
-        f"tshark -r {pcap_file} -Y 'frame.len > 1500{time_filter}' "
-        f"-T fields -e frame.number -e frame.len -e ip.src -e ip.dst | head -n 15"
-    )
-    print("\n-- Unusually Large Packets --")
-    print(large_packets or "No unusually large packets detected")
-    results["large_packets"] = large_packets
-    
-    # Find fragmented packets (potential evasion)
-    fragmented = run_command(
-        f"tshark -r {pcap_file} -Y 'ip.flags.mf == 1 or ip.frag_offset > 0{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
-    )
-    print("\n-- Fragmented Packets --")
-    print(fragmented or "No fragmented packets detected")
-    results["fragmented"] = fragmented
-    
-    # Check for TCP window size anomalies
-    window_anomalies = run_command(
-        f"tshark -r {pcap_file} -Y 'tcp.window_size == 0 and tcp.flags.reset == 0{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst | head -n 15"
-    )
-    print("\n-- TCP Window Size Zero (Potential DoS) --")
-    print(window_anomalies or "No TCP window size anomalies detected")
-    results["window_anomalies"] = window_anomalies
-    
-    # Unusual TTL values (possible spoofing or covert channel)
-    unusual_ttl = run_command(
-        f"tshark -r {pcap_file} -Y 'ip.ttl < 10 or ip.ttl > 250{time_filter}' "
-        f"-T fields -e frame.number -e ip.src -e ip.dst -e ip.ttl | head -n 15"
-    )
-    print("\n-- Unusual TTL Values (Potential Spoofing) --")
-    print(unusual_ttl or "No unusual TTL values detected")
-    results["unusual_ttl"] = unusual_ttl
-    
-    return results
-
 def verify_packets(pcap_file, frame_numbers):
-    """Verify suspicious packets by examining their full content"""
+    """Verify suspicious packets by examining their full content based on the frame numbers"""
     if not frame_numbers:
         return None
         
     # Convert frame_numbers list to a filter expression
     if isinstance(frame_numbers, str):
         # Extract frame numbers from output
-        frame_numbers = [line.split()[0] for line in frame_numbers.strip().split('\n') if line.strip()]
+        frames = []
+        for line in frame_numbers.strip().split('\n'):
+            if line.strip() and line.split()[0].isdigit():
+                frames.append(line.split()[0])
+        frame_numbers = frames
     
     if not frame_numbers:
         return None
@@ -476,7 +576,7 @@ def reconstruct_session(pcap_file, ip_src, ip_dst, tcp_stream_index=None):
     
     # Extract HTTP content if present
     http_content = run_command(
-        f"tshark -r {pcap_file} -Y \"tcp.stream eq {tcp_stream_index} and http\" -T fields -e http.request.method -e http.request.uri -e http.file_data"
+        f"tshark -r {pcap_file} -Y \"tcp.stream eq {tcp_stream_index} and http\" -T fields -e http.request.method -e http.request.uri -e data"
     )
     
     if http_content:
@@ -638,6 +738,8 @@ def calculate_severity(attack_type, count, payload=None):
         severity = "High"
     elif count > 10:
         severity = "Medium"
+    elif count > 0:
+        severity = "Low"
         
     # Adjust based on attack type
     if attack_type in ["sql_injection", "command_injection"]:
@@ -653,38 +755,52 @@ def output_results(results, format_type="text", file=None):
     """Output results in the specified format"""
     if not results:
         return
+    
+    # Sanitize output file path if provided
+    safe_file_path = sanitize_output_path(file) if file else None
         
     if format_type == "text":
         # Already printed to console in readable format
         pass
     elif format_type == "json":
-        json_results = json.dumps(results, indent=2)
-        if file:
-            with open(file, 'w') as f:
-                f.write(json_results)
-            print(f"Results exported to {file} in JSON format")
-        else:
-            print(json_results)
+        try:
+            json_results = json.dumps(results, indent=2)
+            if safe_file_path:
+                with open(safe_file_path, 'w') as f:
+                    f.write(json_results)
+                print(f"Results exported to {safe_file_path} in JSON format")
+            else:
+                print(json_results)
+        except Exception as e:
+            print(f"Error exporting JSON results: {e}")
     elif format_type == "csv":
-        if file:
-            with open(file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Section", "Content"])
+        try:
+            if safe_file_path:
+                with open(safe_file_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Section", "Content"])
+                    for section, content in results.items():
+                        if content:
+                            writer.writerow([section, str(content)])
+                print(f"Results exported to {safe_file_path} in CSV format")
+            else:
+                # Print CSV to console
+                print("Section,Content")
                 for section, content in results.items():
                     if content:
-                        writer.writerow([section, content])
-            print(f"Results exported to {file} in CSV format")
-        else:
-            # Print CSV to console
-            print("Section,Content")
-            for section, content in results.items():
-                if content:
-                    print(f"{section},{content[:50]}...")
+                        # Truncate content for display
+                        display_content = str(content)[:50] + "..." if len(str(content)) > 50 else str(content)
+                        print(f"{section},{display_content}")
+        except Exception as e:
+            print(f"Error exporting CSV results: {e}")
     elif format_type == "html":
-        generate_html_report(results, file or "pcap_analysis_report.html")
+        generate_html_report(results, safe_file_path or "pcap_analysis_report.html")
 
 def generate_html_report(results, output_file):
     """Generate a comprehensive HTML report with all findings"""
+    # Sanitize the output path
+    safe_output_path = sanitize_output_path(output_file)
+    
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -718,46 +834,77 @@ def generate_html_report(results, output_file):
             elif any(term in section for term in ["brute_force", "port_scan", "medium"]):
                 severity_class = "medium"
                 
+            # Sanitize content before including in HTML
+            safe_content = str(content).replace("<", "&lt;").replace(">", "&gt;")
+            
             html_content += f"""
     <div class="section {severity_class}">
         <h2>{section.replace('_', ' ').title()}</h2>
-        <pre>{content}</pre>
+        <pre>{safe_content}</pre>
     </div>"""
     
     html_content += """
 </body>
 </html>"""
     
-    with open(output_file, 'w') as f:
-        f.write(html_content)
-    
-    print(f"HTML report generated: {output_file}")
-    return output_file
+    try:
+        with open(safe_output_path, 'w') as f:
+            f.write(html_content)
+        
+        print(f"HTML report generated: {safe_output_path}")
+        return safe_output_path
+    except Exception as e:
+        print(f"Error writing HTML report: {e}")
+        return None
 
 def export_for_visualization(pcap_file, output_file):
     """Export key data for visualization in external tools"""
+    # Sanitize the output path
+    safe_output_path = sanitize_output_path(output_file)
+    
     # Create a structured dataset for visualization tools
-    viz_data = run_command(f"""
+    viz_data = run_command_with_retry(f"""
         tshark -r {pcap_file} -T fields -e frame.time_epoch -e ip.src -e ip.dst -e 
-        ip.proto -e tcp.srcport -e tcp.dstport -E header=y -E separator=, > {output_file}
+        ip.proto -e tcp.srcport -e tcp.dstport -E header=y -E separator=, > {safe_output_path}
     """)
     
-    print(f"Data exported to {output_file} for visualization")
+    print(f"Data exported to {safe_output_path} for visualization")
     print("Recommended visualization: Use Wireshark's built-in statistics or import to ELK stack")
-    return output_file
+    return safe_output_path
 
 def save_config(args, config_file):
     """Save current configuration to file"""
-    with open(config_file, 'w') as f:
-        json.dump(vars(args), f, indent=2)
-    print(f"Configuration saved to {config_file}")
+    # Sanitize the file path
+    safe_config_path = sanitize_output_path(config_file)
+    
+    try:
+        with open(safe_config_path, 'w') as f:
+            json.dump(vars(args), f, indent=2)
+        print(f"Configuration saved to {safe_config_path}")
+    except Exception as e:
+        print(f"Error saving configuration: {e}")
 
 def load_config(config_file):
     """Load configuration from file"""
-    with open(config_file, 'r') as f:
-        return json.load(f)
+    try:
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading configuration from {config_file}: {e}")
+        return {}
 
 def main():
+    # Verify that all required dependencies are available
+    required_dependencies = ["tshark", "capinfos", "mergecap", "editcap"]
+    try:
+        for dependency in required_dependencies:
+            verify_dependency(dependency)
+    except DependencyError as e:
+        print(f"Error: {e}")
+        if hasattr(e, 'install_instructions') and e.install_instructions:
+            print(f"Install instructions: {e.install_instructions}")
+        sys.exit(1)
+        
     parser = argparse.ArgumentParser(description="Detect common attack patterns in PCAP files")
     parser.add_argument("pcap_file", help="Path to the PCAP file to analyze")
     
@@ -823,11 +970,18 @@ def main():
         print(f"Error: PCAP file '{args.pcap_file}' does not exist.")
         sys.exit(1)
     
-    # Time filtering
+    if not validate_pcap_file(args.pcap_file):
+        print(f"Error: '{args.pcap_file}' is not a valid PCAP file")
+        sys.exit(1)
+    
+    # Time filtering - with sanitization
     time_filter = ""
     if args.start_time and args.end_time:
-        time_filter = f" and (frame.time >= \"{args.start_time}\" and frame.time <= \"{args.end_time}\")"
-        print(f"Time filtering applied: {args.start_time} to {args.end_time}")
+        # Sanitize the time filter values to prevent command injection
+        safe_start_time = sanitize_filter(args.start_time)
+        safe_end_time = sanitize_filter(args.end_time)
+        time_filter = f" and (frame.time >= \"{safe_start_time}\" and frame.time <= \"{safe_end_time}\")"
+        print(f"Time filtering applied: {safe_start_time} to {safe_end_time}")
     
     print(f"\n{'='*30} Analyzing {os.path.basename(args.pcap_file)} for attacks {'='*30}")
     
@@ -909,7 +1063,7 @@ def main():
         print("\n=== Verifying Suspicious Packets ===")
         frame_numbers = []
         for attack_type, data in results.items():
-            if isinstance(data, str) and 'frame.number' in data:
+            if isinstance(data, str) and data.strip():
                 try:
                     frame_lines = data.strip().split('\n')
                     for line in frame_lines:

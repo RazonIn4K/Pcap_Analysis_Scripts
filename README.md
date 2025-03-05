@@ -1,30 +1,42 @@
-# PCAP Analyzer
+# PCAP Attack Detector
 
-An advanced network security analysis tool for analyzing PCAP files and detecting various security threats and anomalies.
+A comprehensive security analysis tool for examining PCAP files to detect attack signatures and network security issues.
+
+## Overview
+
+PCAP Attack Detector analyzes packet capture (PCAP) files to identify a wide range of attack patterns including SQL injection, XSS, command injection, port scanning, DoS/DDoS attacks, and more. The tool leverages tshark (Wireshark's command-line utility) for deep packet inspection and analysis.
+
+## Recent Updates
+
+- Fixed SQL injection detection by removing unsupported field references
+- Improved SYN flood and port scan detection with more reliable tshark commands
+- Enhanced command injection detection with proper backtick character handling
+- Resolved shell interpretation issues in command execution
+- Added proper dependency verification and error handling
 
 ## Features
 
-- **Comprehensive Analysis**: Analyze PCAP files for a wide range of security threats and anomalies
-- **Modular Design**: Organized into modules for core functionality, analysis, detection, threat intelligence, and reporting
-- **Multiple Detection Methods**: Detect web attacks, network attacks, and malware activity
-- **Advanced Analysis Techniques**: Timing pattern analysis, anomaly detection, and more
-- **Threat Intelligence Integration**: Load and use indicators of compromise (IOCs) from files or APIs
-- **Flexible Output Options**: Generate reports in JSON, YAML, CSV, or HTML formats
-- **Visualization Support**: Create visual representations of analysis results
+- **Multi-attack Detection**: Identifies 10+ types of attacks from a single PCAP file
+- **Advanced Analysis**: Performs deep packet inspection for sophisticated attack patterns
+- **Severity Assessment**: Calculates severity scores for detected security issues
+- **Session Reconstruction**: Rebuilds suspicious TCP sessions for detailed analysis
+- **Service Correlation**: Integrates with Nmap scan results for service context
+- **Flexible Output**: Exports results in multiple formats (text, JSON, CSV, HTML)
+- **Visualization Support**: Exports data for external visualization tools
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.7 or higher
-- Wireshark/tshark (command-line utilities)
+- Python 3.6 or higher
+- tshark (Wireshark command-line utility)
 
 ### Setup
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/pcap-analyzer.git
-   cd pcap-analyzer
+   git clone https://github.com/yourusername/pcap-attack-detector.git
+   cd pcap-attack-detector
    ```
 
 2. Install the required dependencies:
@@ -42,7 +54,7 @@ An advanced network security analysis tool for analyzing PCAP files and detectin
 ### Basic Usage
 
 ```
-python pcap_analyzer.py <pcap_file> [options]
+python pcap_attack_detector.py <pcap_file> [options]
 ```
 
 ### Command-Line Options
@@ -67,22 +79,22 @@ python pcap_analyzer.py <pcap_file> [options]
 
 Basic analysis of a PCAP file:
 ```
-python pcap_analyzer.py capture.pcap --basic
+python pcap_attack_detector.py capture.pcap --basic
 ```
 
 Full analysis with all detection modules:
 ```
-python pcap_analyzer.py capture.pcap --full
+python pcap_attack_detector.py capture.pcap --full
 ```
 
 Detect web attacks and generate HTML report:
 ```
-python pcap_analyzer.py capture.pcap --detect-web --output-format html
+python pcap_attack_detector.py capture.pcap --detect-web --output-format html
 ```
 
 Use custom signatures and check against IOCs:
 ```
-python pcap_analyzer.py capture.pcap --custom-signatures signatures.yaml --ioc-file iocs.json
+python pcap_attack_detector.py capture.pcap --custom-signatures signatures.yaml --ioc-file iocs.json
 ```
 
 ## Module Structure
@@ -138,4 +150,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
